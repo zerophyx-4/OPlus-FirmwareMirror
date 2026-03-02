@@ -1,16 +1,11 @@
-name: Mirror Oplus ROM to Pixeldrain
+name: Run Firmware Mirror
 
 on:
   workflow_dispatch:
     inputs:
       ota_url:
-        description: "Link OTA dari Oplus (downloadCheck URL)"
+        description: "Paste link OTA Oplus (downloadCheck URL)"
         required: true
-        type: string
-      file_name:
-        description: "Nama file output (contoh: RealmeGT2_A13.zip)"
-        required: false
-        default: "oplus_rom.zip"
         type: string
 
 jobs:
@@ -18,77 +13,84 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Direct Download URL from OTA JSON
-        id: get_url
+      - name: Install PycURL
+        run: pip install pycurl --break-system-packages || pip install pycurl
+
+      - name: Bypass downloadCheck & Download ROM
         run: |
-          echo "Fetching OTA JSON..."
-          RESPONSE=$(curl -sL \
-            -A "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36" \
-            "${{ github.event.inputs.ota_url }}")
+          python3 << 'EOF'
+          import pycurl, json, os
+          from io import BytesIO
 
-          echo "Response: $RESPONSE"
+          ota_url = os.environ["OTA_URL"]
+          print(f"🔍 Fetching: {ota_url}")
 
-          # Ambil URL dari JSON (field "url" atau "downUrl")
-          DIRECT_URL=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          # Coba beberapa kemungkinan field name
-          for key in ['url', 'downUrl', 'download_url', 'downloadUrl']:
-              if key in data:
-                  print(data[key])
+          # Fetch JSON
+          buf = BytesIO()
+          c = pycurl.Curl()
+          c.setopt(c.URL, ota_url)
+          c.setopt(c.WRITEDATA, buf)
+          c.setopt(c.FOLLOWLOCATION, True)
+          c.setopt(c.USERAGENT, "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36")
+          c.setopt(c.SSL_VERIFYPEER, False)
+          c.setopt(c.TIMEOUT, 30)
+          c.perform()
+          c.close()
+
+          response = buf.getvalue().decode("utf-8")
+          print(f"📄 Response: {response[:300]}")
+
+          data = json.loads(response)
+
+          # Cari direct URL
+          direct_url = None
+          for key in ["url", "downUrl", "download_url", "downloadUrl", "fileUrl"]:
+              if key in data and data[key]:
+                  direct_url = data[key]
+                  print(f"✅ Direct URL ditemukan di field '{key}'")
                   break
-          ")
 
-          if [ -z "$DIRECT_URL" ]; then
-            echo "❌ Gagal dapat URL! Cek response di atas."
-            exit 1
-          fi
+          if not direct_url:
+              raise Exception(f"❌ Gagal dapat URL! Response: {response}")
 
-          echo "✅ Direct URL: $DIRECT_URL"
-          echo "direct_url=$DIRECT_URL" >> $GITHUB_OUTPUT
+          print(f"🔗 URL: {direct_url}")
 
-      - name: Download ROM
-        run: |
-          echo "Downloading ROM..."
-          curl -L \
-            -A "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36" \
-            --progress-bar \
-            -o "${{ github.event.inputs.file_name }}" \
-            "${{ steps.get_url.outputs.direct_url }}"
+          # Tentukan nama file
+          file_name = direct_url.split("/")[-1].split("?")[0]
+          if not file_name.endswith(".zip"):
+              file_name = "oplus_rom.zip"
+          print(f"📁 Nama file: {file_name}")
 
-          # Cek ukuran file
-          FILE_SIZE=$(du -sh "${{ github.event.inputs.file_name }}" | cut -f1)
-          echo "✅ Download selesai! Ukuran: $FILE_SIZE"
+          # Simpan nama file buat step berikutnya
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"ROM_FILENAME={file_name}\n")
+              f.write(f"DIRECT_URL={direct_url}\n")
 
-      - name: Upload to Pixeldrain
-        id: upload
-        run: |
-          echo "Uploading to Pixeldrain..."
-          RESPONSE=$(curl -sX PUT \
-            -T "${{ github.event.inputs.file_name }}" \
-            -u ":${{ secrets.PIXELDRAIN_API_KEY }}" \
-            "https://pixeldrain.com/api/file/${{ github.event.inputs.file_name }}")
+          # Download ROM
+          print(f"⬇️ Mulai download...")
+          with open(file_name, "wb") as f:
+              c = pycurl.Curl()
+              c.setopt(c.URL, direct_url)
+              c.setopt(c.WRITEDATA, f)
+              c.setopt(c.FOLLOWLOCATION, True)
+              c.setopt(c.USERAGENT, "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36")
+              c.setopt(c.SSL_VERIFYPEER, False)
+              c.perform()
+              status = c.getinfo(c.RESPONSE_CODE)
+              c.close()
 
-          echo "Upload response: $RESPONSE"
+          if status >= 400:
+              raise Exception(f"❌ Download gagal! HTTP {status}")
 
-          FILE_ID=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print(data.get('id', ''))
-          ")
+          size = os.path.getsize(file_name)
+          print(f"✅ Download selesai! Ukuran: {size / 1024 / 1024:.2f} MB")
+          EOF
+        env:
+          OTA_URL: ${{ github.event.inputs.ota_url }}
 
-          if [ -z "$FILE_ID" ]; then
-            echo "❌ Upload gagal!"
-            exit 1
-          fi
-
-          echo "✅ Upload sukses!"
-          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
-
-      - name: Print Result
-        run: |
-          echo "================================================"
-          echo "✅ MIRROR SELESAI!"
-          echo "📁 File: ${{ github.event.inputs.file_name }}"
-          echo "🔗 Link: https://pixeldrain.com/u/${{ steps.upload.outputs.file_id }}"
-          echo "================================================"
+      - name: Upload ke GitHub Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ROM_FILENAME }}
+          path: ${{ env.ROM_FILENAME }}
+          retention-days: 7
