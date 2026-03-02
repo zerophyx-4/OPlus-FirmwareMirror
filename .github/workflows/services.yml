@@ -1,0 +1,94 @@
+name: Mirror Oplus ROM to Pixeldrain
+
+on:
+  workflow_dispatch:
+    inputs:
+      ota_url:
+        description: "Link OTA dari Oplus (downloadCheck URL)"
+        required: true
+        type: string
+      file_name:
+        description: "Nama file output (contoh: RealmeGT2_A13.zip)"
+        required: false
+        default: "oplus_rom.zip"
+        type: string
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Direct Download URL from OTA JSON
+        id: get_url
+        run: |
+          echo "Fetching OTA JSON..."
+          RESPONSE=$(curl -sL \
+            -A "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36" \
+            "${{ github.event.inputs.ota_url }}")
+
+          echo "Response: $RESPONSE"
+
+          # Ambil URL dari JSON (field "url" atau "downUrl")
+          DIRECT_URL=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          # Coba beberapa kemungkinan field name
+          for key in ['url', 'downUrl', 'download_url', 'downloadUrl']:
+              if key in data:
+                  print(data[key])
+                  break
+          ")
+
+          if [ -z "$DIRECT_URL" ]; then
+            echo "❌ Gagal dapat URL! Cek response di atas."
+            exit 1
+          fi
+
+          echo "✅ Direct URL: $DIRECT_URL"
+          echo "direct_url=$DIRECT_URL" >> $GITHUB_OUTPUT
+
+      - name: Download ROM
+        run: |
+          echo "Downloading ROM..."
+          curl -L \
+            -A "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36" \
+            --progress-bar \
+            -o "${{ github.event.inputs.file_name }}" \
+            "${{ steps.get_url.outputs.direct_url }}"
+
+          # Cek ukuran file
+          FILE_SIZE=$(du -sh "${{ github.event.inputs.file_name }}" | cut -f1)
+          echo "✅ Download selesai! Ukuran: $FILE_SIZE"
+
+      - name: Upload to Pixeldrain
+        id: upload
+        run: |
+          echo "Uploading to Pixeldrain..."
+          RESPONSE=$(curl -sX PUT \
+            -T "${{ github.event.inputs.file_name }}" \
+            -u ":${{ secrets.PIXELDRAIN_API_KEY }}" \
+            "https://pixeldrain.com/api/file/${{ github.event.inputs.file_name }}")
+
+          echo "Upload response: $RESPONSE"
+
+          FILE_ID=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('id', ''))
+          ")
+
+          if [ -z "$FILE_ID" ]; then
+            echo "❌ Upload gagal!"
+            exit 1
+          fi
+
+          echo "✅ Upload sukses!"
+          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
+
+      - name: Print Result
+        run: |
+          echo "================================================"
+          echo "✅ MIRROR SELESAI!"
+          echo "📁 File: ${{ github.event.inputs.file_name }}"
+          echo "🔗 Link: https://pixeldrain.com/u/${{ steps.upload.outputs.file_id }}"
+          echo "================================================"
